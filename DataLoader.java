@@ -1,206 +1,163 @@
 package com.cinco;
 
-/*
- * A central data management class that parses multiple CSV files to populate internal maps, establishing 
- * complex relationships between persons, companies, items, and invoices.
- */
-import java.io.File;
+import java.sql.*;
 import java.time.LocalDate;
 import java.util.*;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class DataLoader {
+    private static final Logger logger = LogManager.getLogger(DataLoader.class);
 
-    public Map<String, Person> persons = new HashMap<>();
-    public Map<String, Company> companies = new HashMap<>();
-    public Map<String, ItemTemplate> itemTemplates = new HashMap<>();
-    public Map<String, Invoice> invoices = new HashMap<>();
-    
-//Reads a CSV file containing personal information and populates the persons map.
-    /* =========================
-       LOAD PERSONS
-       ========================= */
-    public void loadPersons(String fileName) throws Exception {
-        Scanner sc = new Scanner(new File(fileName));
-        if (sc.hasNextLine()) sc.nextLine(); 
+    private final Map<String, Person> persons = new HashMap<>();
+    private final Map<String, Company> companies = new HashMap<>();
+    private final Map<String, Item> itemTemplates = new HashMap<>(); 
+    private final Map<String, Invoice> invoices = new HashMap<>();
 
-        while (sc.hasNextLine()) {
-            String line = sc.nextLine().trim();
-            if (line.isEmpty()) continue;
-
-            String[] tokens = line.split(",");
-            if (tokens.length < 4) continue;
-
-            String uuid = tokens[0];
-            String first = tokens[1];
-            String last = tokens[2];
-            String phone = tokens[3];
-
-            List<String> emails = new ArrayList<>();
-            for (int i = 4; i < tokens.length; i++) {
-                if (!tokens[i].isBlank()) emails.add(tokens[i]);
-            }
-
-            persons.put(uuid, new Person(uuid, first, last, phone, emails));
-        }
-        sc.close();
+    public void loadAll() {
+        loadPersons();
+        loadCompanies();
+        loadItems();
+        loadInvoices();
+        loadInvoiceItems(); 
     }
 
-    //Parses company data and associates each company with a "Primary Contact" from the previously loaded persons.
-    /* =========================
-       LOAD COMPANIES
-       ========================= */
-    public void loadCompanies(String fileName) throws Exception {
-        Scanner sc = new Scanner(new File(fileName));
-        if (sc.hasNextLine()) sc.nextLine(); 
-
-        while (sc.hasNextLine()) {
-            String line = sc.nextLine().trim();
-            if (line.isEmpty()) continue;
-
-            String[] t = line.split(",");
-            if (t.length < 7) continue;
-
-            String uuid = t[0];
-            String contactUuid = t[1];
-            String name = t[2];
-            String street = t[3];
-            String city = t[4];
-            String state = t[5];
-            String zip = t[6];
-
-            Person contact = persons.get(contactUuid);
-            if (contact == null) {
-                System.err.println("Company contact not found: " + contactUuid);
-                continue;
-            }
-
-            Address address = new Address(street, city, state, zip);
-            companies.put(uuid, new Company(uuid, contact, name, address));
-        }
-        sc.close();
-    }
-
-    //Creates templates for different types of business offerings (Equipment, Services, or Licenses).
-    /* =========================
-       LOAD ITEM TEMPLATES
-       ========================= */
-    public void loadItems(String fileName) throws Exception {
-        Scanner sc = new Scanner(new File(fileName));
-        if (sc.hasNextLine()) sc.nextLine();
-
-        while (sc.hasNextLine()) {
-            String line = sc.nextLine().trim();
-            if (line.isEmpty()) continue;
-
-            String[] t = line.split(",");
-            String uuid = t[0];
-            String name = t[1];
-            String type = t[2];
-
-            try {
-                if (type.equals("E") || type.equals("S")) {
-                    double baseRate = Double.parseDouble(t[3]);
-                    itemTemplates.put(uuid, new ItemTemplate(uuid, type, name, baseRate));
-                } else if (type.equals("L")) {
-                    double monthlyFee = Double.parseDouble(t[3]);
-                    double licenseFee = Double.parseDouble(t[4]);
-                    itemTemplates.put(uuid, new ItemTemplate(uuid, type, name, monthlyFee, licenseFee));
+    private void loadPersons() {
+        String sql = "SELECT p.personId, p.personUuid, p.firstName, p.lastName, " +
+                     "a.street, z.city, z.state, z.zip, e.emailAddress " +
+                     "FROM Person p " +
+                     "LEFT JOIN Address a ON p.addressId = a.addressId " +
+                     "LEFT JOIN ZipCode z ON a.zipCodeId = z.zipCodeId " +
+                     "LEFT JOIN Email e ON p.personId = e.personId";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                String uuid = rs.getString("personUuid");
+                if (!persons.containsKey(uuid)) {
+                    Address addr = (rs.getString("street") == null) ? null :
+                        new Address(null, rs.getString("street"), rs.getString("city"), rs.getString("state"), rs.getString("zip"));
+                    persons.put(uuid, new Person(rs.getInt("personId"), uuid, rs.getString("firstName"), rs.getString("lastName"), addr));
                 }
-            } catch (Exception e) {
-                System.err.println("Error parsing item template: " + uuid);
+                if (rs.getString("emailAddress") != null) persons.get(uuid).addEmail(rs.getString("emailAddress"));
             }
-        }
-        sc.close();
+        } catch (SQLException e) { logger.error("Error loading persons: ", e); }
     }
 
-    //Initializes the "Header" of an invoice, connecting a customer to a salesperson.
-    /* =========================
-       LOAD INVOICES
-       ========================= */
-    public void loadInvoices(String fileName) throws Exception {
-        Scanner sc = new Scanner(new File(fileName));
-        if (sc.hasNextLine()) sc.nextLine();
-
-        while (sc.hasNextLine()) {
-            String line = sc.nextLine().trim();
-            if (line.isEmpty()) continue;
-
-            String[] t = line.split(",");
-            String uuid = t[0];
-            String customerUuid = t[1];
-            String salesUuid = t[2];
-            LocalDate date = LocalDate.parse(t[3]);
-
-            Company customer = companies.get(customerUuid);
-            Person salesPerson = persons.get(salesUuid);
-
-            if (customer != null && salesPerson != null) {
-                invoices.put(uuid, new Invoice(uuid, customer, salesPerson, date));
+    private void loadCompanies() {
+        String sql = "SELECT c.companyId, c.companyUuid, c.name, a.street, z.city, z.state, z.zip, p.personUuid AS contactUuid " +
+                     "FROM Company c " +
+                     "LEFT JOIN Address a ON c.addressId = a.addressId " +
+                     "LEFT JOIN ZipCode z ON a.zipCodeId = z.zipCodeId " +
+                     "LEFT JOIN Person p ON c.primaryContactId = p.personId";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                Address addr = new Address(null, rs.getString("street"), rs.getString("city"), rs.getString("state"), rs.getString("zip"));
+                companies.put(rs.getString("companyUuid"), new Company(rs.getInt("companyId"), rs.getString("companyUuid"), rs.getString("name"), persons.get(rs.getString("contactUuid")), addr));
             }
-        }
-        sc.close();
+        } catch (SQLException e) { logger.error("Error loading companies: ", e); }
     }
 
-    //The "Junction" method that populates existing invoices with specific line items.
-    /* =========================
-       LOAD INVOICE ITEMS
-       ========================= */
-    public void loadInvoiceItems(String fileName) throws Exception {
-        Scanner sc = new Scanner(new File(fileName));
-        if (sc.hasNextLine()) sc.nextLine();
-
-        while (sc.hasNextLine()) {
-            String line = sc.nextLine().trim();
-            if (line.isEmpty()) continue;
-
-            String[] t = line.split(",");
-            String invoiceUuid = t[0];
-            String itemUuid = t[1];
-
-            Invoice invoice = invoices.get(invoiceUuid);
-            ItemTemplate template = itemTemplates.get(itemUuid);
-
-            if (invoice == null || template == null) continue;
-
-            try {
-                String type = template.getTypeCode();
+    private void loadItems() {
+        String sql = "SELECT itemUuid, itemType, name, basePrice, serviceRate, licenseFee FROM Item";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                String uuid = rs.getString("itemUuid");
+                String type = rs.getString("itemType");
+                String name = rs.getString("name");
+                Item item = null; 
                 
                 if (type.equals("E")) {
-                    invoice.addItem(new Equipment(template.getUuid(), template.getName(), template.getBaseRate()));
-                
+                    item = new Equipment(uuid, name, rs.getDouble("basePrice"), 0); 
                 } else if (type.equals("S")) {
-
-                    invoice.addItem(new Service(template.getUuid(), template.getName(), template.getBaseRate()));
-                
+                    item = new Service(uuid, name, rs.getDouble("serviceRate"), 0.0);
                 } else if (type.equals("L")) {
-
-                    invoice.addItem(new License(template.getUuid(), template.getName(), template.getExtraFee(), template.getBaseRate()));
+                    item = new License(uuid, name, rs.getDouble("basePrice"), 0);
                 }
-            } catch (Exception ex) {
-                System.err.println("Error loading invoice item for " + invoiceUuid + ": " + ex.getMessage());
+                
+                if (item != null) {
+                    itemTemplates.put(uuid, item);
+                }
             }
+        } catch (SQLException e) { logger.error("Error loading items: ", e); }
+    }
+
+    private void loadInvoices() {
+        // We use JOIN to get the UUID strings from the Company and Person tables
+        String sql = "SELECT i.invoiceUuid, i.invoiceDate, c.companyUuid, p.personUuid " +
+                     "FROM Invoice i " +
+                     "JOIN Company c ON i.customerId = c.companyId " +
+                     "JOIN Person p ON i.salesPersonId = p.personId";
+                     
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            
+            int count = 0;
+            while (rs.next()) {
+                String invUuid = rs.getString("invoiceUuid");
+                String compUuid = rs.getString("companyUuid");
+                String persUuid = rs.getString("personUuid");
+
+                // Look up the objects in your Map
+                Company customer = companies.get(compUuid);
+                Person salesPerson = persons.get(persUuid);
+
+                // Safety check: Only add if the Map actually found the objects
+                if (customer != null && salesPerson != null) {
+                    invoices.put(invUuid, new Invoice(invUuid, customer, salesPerson, rs.getDate("invoiceDate").toLocalDate()));
+                    count++;
+                } else {
+                    // This helps us see which specific UUID is failing the lookup
+                    System.out.println("DEBUG: Lookup failed for Invoice " + invUuid);
+                    if (customer == null) System.out.println("  -> Company UUID not found: " + compUuid);
+                    if (salesPerson == null) System.out.println("  -> Person UUID not found: " + persUuid);
+                }
+            }
+            System.out.println("Total Invoices loaded: " + count);
+            
+        } catch (SQLException e) {
+            logger.error("Error in loadInvoices: ", e);
         }
-        sc.close();
     }
 
-    /* =========================
-       GETTERS
-       ========================= */
+    private void loadInvoiceItems() {
+        String sql = "SELECT i.invoiceUuid, it.itemUuid, it.itemType, it.name, it.basePrice, it.serviceRate, it.licenseFee, ii.quantityOrHours " +
+                     "FROM InvoiceItem ii JOIN Invoice i ON ii.invoiceId = i.invoiceId " +
+                     "JOIN Item it ON ii.itemId = it.itemId";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                Invoice inv = invoices.get(rs.getString("invoiceUuid"));
+                if (inv == null) continue;
 
-    //returns an ArrayList of the populated Person class values
-    public List<Person> getPersons() {
-        return new ArrayList<>(this.persons.values());
+                String type = rs.getString("itemType");
+                String uuid = rs.getString("itemUuid");
+                String name = rs.getString("name");
+                double qh = rs.getDouble("quantityOrHours");
+
+                if (type.equals("E")) {
+                    inv.addItem(new Equipment(uuid, name, rs.getDouble("basePrice"), (int)qh));
+                } else if (type.equals("S")) {
+                    inv.addItem(new Service(uuid, name, rs.getDouble("serviceRate"), qh));
+                } else if (type.equals("L")) {
+                    inv.addItem(new License(uuid, name, rs.getDouble("basePrice"), (int)qh));
+                }
+            }
+        } catch (SQLException e) { logger.error("Error loading invoice items: ", e); }
     }
-  //returns an ArrayList of the populated Company class values
-    public List<Company> getCompanies() {
-        return new ArrayList<>(this.companies.values());
-    }
-  //returns an ArrayList of the populated Item class values
-    public List<ItemTemplate> getItemTemplates() {
-        return new ArrayList<>(this.itemTemplates.values());
-    }
-  //returns an ArrayList of the populated Invoice class values
-    public List<Invoice> getInvoices() {
+
+    public Map<String, Person> getPersons() { return this.persons; }
+    public Map<String, Company> getCompanies() { return this.companies; }
+    public Map<String, Item> getItemTemplates() { return this.itemTemplates; }
+    public Map<String, Invoice> getInvoices() { return this.invoices; }
+    
+    public List<Invoice> getInvoicesList() {
         return new ArrayList<>(this.invoices.values());
     }
 }
