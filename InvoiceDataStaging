@@ -1,0 +1,152 @@
+package com.cinco;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.time.LocalDate;
+
+public class InvoiceData {
+
+    /**
+     * MAIN METHOD: This replaces InvoiceDataStaging.
+     * You can now right-click THIS file and "Run" it to populate the DB.
+     */
+    public static void main(String[] args) {
+        System.out.println("Starting Database Population...");
+        
+        try {
+            clearDatabase();
+            
+            // 1. Add People
+            addPerson("p-001", "Randi", "Schoen", "Lincoln");
+            addPerson("p-002", "Stacie", "Burnham", "Omaha");
+            
+            // 2. Add Companies
+            addCompany("c-001", "Cinco Consulting", "p-001", "123 Main St", "Lincoln", "NE", "68508");
+            
+            // 3. Add Items
+            addEquipment("e-001", "Dell Latitude", 1200.00);
+            addService("s-001", "Database Design", 150.00);
+            addLicense("l-001", "IntelliJ IDEA", 0.0, 500.00);
+            
+            // 4. Add Invoices
+            addInvoice("INV-001", "c-001", "p-002", LocalDate.now());
+            
+            // 5. Link Items to Invoices
+            addEquipmentPurchaseToInvoice("INV-001", "e-001", 2);
+            addServiceToInvoice("INV-001", "s-001", "p-001", 10.5);
+            addLicenseToInvoice("INV-001", "l-001", LocalDate.of(2026, 1, 1), LocalDate.of(2026, 6, 30));
+            
+            System.out.println("Database Population Successful!");
+        } catch (Exception e) {
+            System.err.println("Population failed!");
+            e.printStackTrace();
+        }
+    }
+
+    /* --- DATABASE LOGIC METHODS --- */
+
+    public static void clearDatabase() {
+        String[] tables = {"InvoiceItem", "Invoice", "Email", "Company", "Item", "Person"};
+        try (Connection conn = ConnectionFactory.getConnection()) {
+            conn.prepareStatement("SET FOREIGN_KEY_CHECKS = 0").execute();
+            for (String table : tables) {
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM " + table)) {
+                    ps.executeUpdate();
+                }
+            }
+            conn.prepareStatement("SET FOREIGN_KEY_CHECKS = 1").execute();
+        } catch (SQLException e) { throw new RuntimeException(e); }
+    }
+
+    public static void addPerson(Object personCode, String firstName, String lastName, String city) {
+        String sql = "INSERT INTO Person (personUuid, firstName, lastName, city) VALUES (?, ?, ?, ?)";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, personCode.toString());
+            ps.setString(2, firstName);
+            ps.setString(3, lastName);
+            ps.setString(4, city);
+            ps.executeUpdate();
+        } catch (SQLException e) { throw new RuntimeException(e); }
+    }
+
+    public static void addCompany(Object companyCode, String name, Object contactCode, String street, String city, String state, String zip) {
+        String sql = "INSERT INTO Company (companyUuid, name, primaryContactId, street, city, state, zip) " +
+                     "VALUES (?, ?, (SELECT personId FROM Person WHERE personUuid = ?), ?, ?, ?, ?)";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, companyCode.toString());
+            ps.setString(2, name);
+            ps.setString(3, contactCode.toString());
+            ps.setString(4, street);
+            ps.setString(5, city);
+            ps.setString(6, state);
+            ps.setString(7, zip);
+            ps.executeUpdate();
+        } catch (SQLException e) { throw new RuntimeException(e); }
+    }
+
+    public static void addEquipment(Object itemCode, String name, double pricePerUnit) {
+        String sql = "INSERT INTO Item (itemUuid, itemType, name, basePrice) VALUES (?, 'E', ?, ?)";
+        executeItem(itemCode, name, pricePerUnit, sql);
+    }
+
+    public static void addService(Object itemCode, String name, double hourlyRate) {
+        String sql = "INSERT INTO Item (itemUuid, itemType, name, basePrice, serviceRate) VALUES (?, 'S', ?, 0.0, ?)";
+        executeItem(itemCode, name, hourlyRate, sql);
+    }
+
+    public static void addLicense(Object itemCode, String name, double serviceFee, double annualFee) {
+        String sql = "INSERT INTO Item (itemUuid, itemType, name, basePrice, licenseFee) VALUES (?, 'L', ?, ?, ?)";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, itemCode.toString());
+            ps.setString(2, name);
+            ps.setDouble(3, serviceFee);
+            ps.setDouble(4, annualFee);
+            ps.executeUpdate();
+        } catch (SQLException e) { throw new RuntimeException(e); }
+    }
+
+    public static void addInvoice(Object invoiceCode, Object companyCode, Object salespersonCode, LocalDate date) {
+        String sql = "INSERT INTO Invoice (invoiceUuid, invoiceDate, customerPersonId, salesPersonId) VALUES (?, ?, " +
+                     "(SELECT primaryContactId FROM Company WHERE companyUuid = ?), " +
+                     "(SELECT personId FROM Person WHERE personUuid = ?))";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, invoiceCode.toString());
+            ps.setDate(2, java.sql.Date.valueOf(date));
+            ps.setString(3, companyCode.toString());
+            ps.setString(4, salespersonCode.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) { throw new RuntimeException(e); }
+    }
+
+    private static void executeItem(Object code, String name, double price, String sql) {
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, code.toString());
+            ps.setString(2, name);
+            ps.setDouble(3, price);
+            ps.executeUpdate();
+        } catch (SQLException e) { throw new RuntimeException(e); }
+    }
+
+    private static void addItemToInvoice(Object invCode, Object itemCode, double quantity) {
+        String sql = "INSERT INTO InvoiceItem (invoiceId, itemId, quantity) VALUES " +
+                     "((SELECT invoiceId FROM Invoice WHERE invoiceUuid = ?), " +
+                     "(SELECT itemId FROM Item WHERE itemUuid = ?), ?)";
+        try (Connection conn = ConnectionFactory.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, invCode.toString());
+            ps.setString(2, itemCode.toString());
+            ps.setDouble(3, quantity);
+            ps.executeUpdate();
+        } catch (SQLException e) { throw new RuntimeException(e); }
+    }
+
+    public static void addEquipmentPurchaseToInvoice(Object invCode, Object itemCode, int quantity) { addItemToInvoice(invCode, itemCode, (double)quantity); }
+    public static void addServiceToInvoice(Object invCode, Object itemCode, Object personCode, double hours) { addItemToInvoice(invCode, itemCode, hours); }
+    public static void addLicenseToInvoice(Object invCode, Object itemCode, LocalDate start, LocalDate end) { addItemToInvoice(invCode, itemCode, 1.0); }
+}
