@@ -1,0 +1,126 @@
+Use evadde2;
+
+
+SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS InvoiceItem;
+DROP TABLE IF EXISTS Invoice;
+DROP TABLE IF EXISTS Item;
+DROP TABLE IF EXISTS Email;
+DROP TABLE IF EXISTS Company;
+DROP TABLE IF EXISTS Person;
+DROP TABLE IF EXISTS Address;
+DROP TABLE IF EXISTS ZipCode;
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- 1. Geographical Data
+CREATE TABLE ZipCode (
+    zipCodeId INT PRIMARY KEY AUTO_INCREMENT,
+    zip VARCHAR(10) NOT NULL UNIQUE,
+    city VARCHAR(50) NOT NULL,
+    state VARCHAR(50) NOT NULL
+);
+
+-- 2. Address Table
+CREATE TABLE Address (
+    addressId INT PRIMARY KEY AUTO_INCREMENT,
+    street VARCHAR(100) NOT NULL,
+    zipCodeId INT NOT NULL,
+    FOREIGN KEY (zipCodeId) REFERENCES ZipCode(zipCodeId)
+);
+
+-- 3. Person Table
+CREATE TABLE Person (
+    personId INT PRIMARY KEY AUTO_INCREMENT,
+    personUuid VARCHAR(36) NOT NULL UNIQUE,
+    firstName VARCHAR(50) NOT NULL,
+    lastName VARCHAR(50) NOT NULL,
+    addressId INT NULL,
+    FOREIGN KEY (addressId) REFERENCES Address(addressId)
+);
+
+-- 4. Email Table
+CREATE TABLE Email (
+    emailId INT PRIMARY KEY AUTO_INCREMENT,
+    personId INT NOT NULL,
+    emailAddress VARCHAR(100) NOT NULL,
+    FOREIGN KEY (personId) REFERENCES Person(personId) ON DELETE CASCADE
+);
+
+-- 5. Company Table
+CREATE TABLE Company (
+    companyId INT PRIMARY KEY AUTO_INCREMENT,
+    companyUuid VARCHAR(36) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    primaryContactId INT NOT NULL,
+    addressId INT NULL,
+    FOREIGN KEY (primaryContactId) REFERENCES Person(personId),
+    FOREIGN KEY (addressId) REFERENCES Address(addressId)
+);
+
+-- 6. Item Table (Contains columns for all 3 types)
+CREATE TABLE Item (
+    itemId INT PRIMARY KEY AUTO_INCREMENT,
+    itemUuid VARCHAR(36) NOT NULL UNIQUE,
+    itemType CHAR(1) NOT NULL, -- 'E', 'S', 'L'
+    name VARCHAR(100) NOT NULL,
+    basePrice DOUBLE NULL,      -- Equipment/License fee
+    serviceRate DOUBLE NULL,    -- Service hourly rate
+    licenseFee DOUBLE NULL      -- License one-time fee
+);
+
+-- 7. Invoice Table
+CREATE TABLE Invoice (
+    invoiceId INT PRIMARY KEY AUTO_INCREMENT,
+    invoiceUuid VARCHAR(36) NOT NULL UNIQUE,
+    customerId INT NOT NULL,
+    salesPersonId INT NOT NULL,
+    invoiceDate DATE NOT NULL,
+    FOREIGN KEY (customerId) REFERENCES Company(companyId),
+    FOREIGN KEY (salesPersonId) REFERENCES Person(personId)
+);
+
+-- 8. InvoiceItem Table (The Junction Table)
+CREATE TABLE InvoiceItem (
+    invoiceItemId INT PRIMARY KEY AUTO_INCREMENT,
+    invoiceId INT NOT NULL,
+    itemId INT NOT NULL,
+    quantityOrHours DOUBLE NOT NULL,
+    servicePersonId INT NULL,    -- Only for Service items
+    startDate DATE NULL,         -- Only for License items
+    endDate DATE NULL,           -- Only for License items
+    purchaseOrLease VARCHAR(10) NULL, -- Only for Equipment
+    FOREIGN KEY (invoiceId) REFERENCES Invoice(invoiceId) ON DELETE CASCADE,
+    FOREIGN KEY (itemId) REFERENCES Item(itemId),
+    FOREIGN KEY (servicePersonId) REFERENCES Person(personId)
+);
+
+-- ==========================================================
+-- SEED DATA (Clean, Linked, and Error-Free)
+-- ==========================================================
+
+INSERT INTO ZipCode (zip, city, state) VALUES ('68508', 'Lincoln', 'NE');
+INSERT INTO Address (street, zipCodeId) VALUES ('123 Main St', 1);
+
+-- p-001 (Manager), p-002 (Technician)
+INSERT INTO Person (personUuid, firstName, lastName, addressId) VALUES 
+('p-001', 'Sales', 'Rep', 1),
+('p-002', 'Tech', 'Expert', 1);
+
+INSERT INTO Company (companyUuid, name, primaryContactId, addressId) 
+VALUES ('c-999', 'Test Corp', 1, 1);
+
+-- Items of different types
+INSERT INTO Item (itemUuid, itemType, name, basePrice, serviceRate, licenseFee) VALUES 
+('i-101', 'E', 'Dell Monitor', 299.99, NULL, NULL),
+('i-102', 'S', 'General Support', NULL, 150.00, NULL),
+('i-103', 'L', 'Office 365', 20.00, NULL, 1000.00);
+
+-- One Invoice (ID will be 1)
+INSERT INTO Invoice (invoiceUuid, customerId, salesPersonId, invoiceDate) 
+VALUES ('inv-001', 1, 1, '2026-04-24');
+
+-- Three items on that invoice
+INSERT INTO InvoiceItem (invoiceId, itemId, quantityOrHours, purchaseOrLease, servicePersonId, startDate, endDate) VALUES 
+(1, 1, 5, 'Purchase', NULL, NULL, NULL),                 -- Equipment
+(1, 2, 10.5, NULL, 2, NULL, NULL),                       -- Service (Linked to Tech Expert)
+(1, 3, 50, NULL, NULL, '2026-01-01', '2026-12-31');      -- License
