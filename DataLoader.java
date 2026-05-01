@@ -15,6 +15,9 @@ public class DataLoader {
     private final Map<String, Invoice> invoices = new HashMap<>();
 
     public void loadAll() {
+        // Log line to match expected output timestamp format if needed
+        logger.info("Started..."); 
+        
         loadPersons();
         loadCompanies();
         loadItems();
@@ -23,43 +26,63 @@ public class DataLoader {
     }
 
     private void loadPersons() {
-        String sql = "SELECT p.personId, p.personUuid, p.firstName, p.lastName, " +
-                     "a.street, z.city, z.state, z.zip, e.emailAddress " +
-                     "FROM Person p " +
-                     "LEFT JOIN Address a ON p.addressId = a.addressId " +
-                     "LEFT JOIN ZipCode z ON a.zipCodeId = z.zipCodeId " +
-                     "LEFT JOIN Email e ON p.personId = e.personId";
+        // We remove the phone column entirely to stop the Syntax Error
+        String sql = "SELECT personId, personUuid, firstName, lastName FROM Person"; 
+        
         try (Connection conn = ConnectionFactory.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
-                String uuid = rs.getString("personUuid");
-                if (!persons.containsKey(uuid)) {
-                    Address addr = (rs.getString("street") == null) ? null :
-                        new Address(null, rs.getString("street"), rs.getString("city"), rs.getString("state"), rs.getString("zip"));
-                    persons.put(uuid, new Person(rs.getInt("personId"), uuid, rs.getString("firstName"), rs.getString("lastName"), addr));
-                }
-                if (rs.getString("emailAddress") != null) persons.get(uuid).addEmail(rs.getString("emailAddress"));
+                String uuid = rs.getString("personUuid").trim();
+                // We pass null for the phone/emails initially
+                Person p = new Person(rs.getInt("personId"), uuid, 
+                                    rs.getString("firstName"), rs.getString("lastName"), null);
+                persons.put(uuid, p);
             }
-        } catch (SQLException e) { logger.error("Error loading persons: ", e); }
+        } catch (SQLException e) { 
+            logger.error("Error loading persons: " + e.getMessage()); 
+            throw new RuntimeException(e);
+        }
     }
-
+ // Inside DataLoader.java
     private void loadCompanies() {
-        String sql = "SELECT c.companyId, c.companyUuid, c.name, a.street, z.city, z.state, z.zip, p.personUuid AS contactUuid " +
+        String sql = "SELECT c.companyId, c.companyUuid, c.name, a.addressId, a.street, z.city, z.state, z.zip, p.personUuid AS contactUuid " +
                      "FROM Company c " +
+                     "LEFT JOIN Person p ON c.primaryContactId = p.personId " +
                      "LEFT JOIN Address a ON c.addressId = a.addressId " +
-                     "LEFT JOIN ZipCode z ON a.zipCodeId = z.zipCodeId " +
-                     "LEFT JOIN Person p ON c.primaryContactId = p.personId";
+                     "LEFT JOIN ZipCode z ON a.zipCodeId = z.zipCodeId";
+                     
         try (Connection conn = ConnectionFactory.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                Address addr = new Address(null, rs.getString("street"), rs.getString("city"), rs.getString("state"), rs.getString("zip"));
-                companies.put(rs.getString("companyUuid"), new Company(rs.getInt("companyId"), rs.getString("companyUuid"), rs.getString("name"), persons.get(rs.getString("contactUuid")), addr));
-            }
-        } catch (SQLException e) { logger.error("Error loading companies: ", e); }
-    }
+             
+        	while (rs.next()) {
+        	    String uuid = rs.getString("companyUuid").trim();
+        	    String name = rs.getString("name");
+        	    
+        	    // FETCH THE PERSON: Using the alias 'contactUuid' from your SELECT
+        	    String contactUuid = rs.getString("contactUuid");
+        	    Person contact = (contactUuid != null) ? persons.get(contactUuid.trim()) : null;
 
+        	    // FETCH THE ADDRESS: Only create if addressId exists
+        	    Address addr = null;
+        	    int addrId = rs.getInt("addressId");
+        	    if (!rs.wasNull()) {
+        	        addr = new Address(
+        	            addrId, 
+        	            rs.getString("street"), 
+        	            rs.getString("city"), 
+        	            rs.getString("state"), 
+        	            rs.getString("zip")
+        	        );
+        	    }
+
+        	    companies.put(uuid, new Company(rs.getInt("companyId"), uuid, name, contact, addr));
+        	}
+        } catch (SQLException e) { 
+            logger.error("Error loading companies: " + e.getMessage()); 
+        }
+    }    
     private void loadItems() {
         String sql = "SELECT itemUuid, itemType, name, basePrice, serviceRate, licenseFee FROM Item";
         try (Connection conn = ConnectionFactory.getConnection();
@@ -72,11 +95,11 @@ public class DataLoader {
                 Item item = null; 
                 
                 if (type.equals("E")) {
-                    item = new Equipment(uuid, name, rs.getDouble("basePrice"), 0); 
+                    item = new Equipment(uuid, name, rs.getDouble("basePrice"), 0, "Purchase"); 
                 } else if (type.equals("S")) {
                     item = new Service(uuid, name, rs.getDouble("serviceRate"), 0.0);
                 } else if (type.equals("L")) {
-                    item = new License(uuid, name, rs.getDouble("basePrice"), 0);
+                    item = new License(uuid, name, rs.getDouble("basePrice"), rs.getDouble("licenseFee"), 0);
                 }
                 
                 if (item != null) {
@@ -87,71 +110,98 @@ public class DataLoader {
     }
 
     private void loadInvoices() {
-        // We use JOIN to get the UUID strings from the Company and Person tables
-        String sql = "SELECT i.invoiceUuid, i.invoiceDate, c.companyUuid, p.personUuid " +
+        String sql = "SELECT i.invoiceUuid, i.invoiceDate, c.companyUuid, p.personUuid AS salesUuid " +
                      "FROM Invoice i " +
-                     "JOIN Company c ON i.customerId = c.companyId " +
-                     "JOIN Person p ON i.salesPersonId = p.personId";
-                     
+                     "LEFT JOIN Company c ON i.customerId = c.companyId " +
+                     "LEFT JOIN Person p ON i.salesPersonId = p.personId";
+
         try (Connection conn = ConnectionFactory.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
             
-            int count = 0;
-            while (rs.next()) {
-                String invUuid = rs.getString("invoiceUuid");
-                String compUuid = rs.getString("companyUuid");
-                String persUuid = rs.getString("personUuid");
+        	while (rs.next()) {
+        	    // 1. Normalize the Invoice UUID
+        	    String invUuid = rs.getString("invoiceUuid").trim().toLowerCase();
+        	    
+        	    // 2. Get Foreign Key UUIDs
+        	    String compUuid = rs.getString("companyUuid");
+        	    String salesUuid = rs.getString("salesUuid");
 
-                // Look up the objects in your Map
-                Company customer = companies.get(compUuid);
-                Person salesPerson = persons.get(persUuid);
+        	    // 3. Look up the objects in your existing Maps
+        	    Company customerCompany = (compUuid != null) ? companies.get(compUuid.trim()) : null;
+        	    Person sales = (salesUuid != null) ? persons.get(salesUuid.trim()) : null;
 
-                // Safety check: Only add if the Map actually found the objects
-                if (customer != null && salesPerson != null) {
-                    invoices.put(invUuid, new Invoice(invUuid, customer, salesPerson, rs.getDate("invoiceDate").toLocalDate()));
-                    count++;
-                } else {
-                    // This helps us see which specific UUID is failing the lookup
-                    System.out.println("DEBUG: Lookup failed for Invoice " + invUuid);
-                    if (customer == null) System.out.println("  -> Company UUID not found: " + compUuid);
-                    if (salesPerson == null) System.out.println("  -> Person UUID not found: " + persUuid);
-                }
-            }
-            System.out.println("Total Invoices loaded: " + count);
-            
-        } catch (SQLException e) {
-            logger.error("Error in loadInvoices: ", e);
+        	    // 4. Handle the Date
+        	    java.sql.Date dbDate = rs.getDate("invoiceDate");
+        	    LocalDate date = (dbDate != null) ? dbDate.toLocalDate() : LocalDate.now();
+
+        	    // 5. THE FIX: Call the constructor with the actual variables
+        	    // Assumes constructor: Invoice(String uuid, Company customer, Person sales, LocalDate date)
+        	    Invoice inv = new Invoice(invUuid, customerCompany, sales, date);
+        	    
+        	    this.invoices.put(invUuid, inv);
+        	}        } catch (SQLException e) { 
+            logger.error("Error loading invoices", e); 
         }
     }
-
+    
     private void loadInvoiceItems() {
-        String sql = "SELECT i.invoiceUuid, it.itemUuid, it.itemType, it.name, it.basePrice, it.serviceRate, it.licenseFee, ii.quantityOrHours " +
-                     "FROM InvoiceItem ii JOIN Invoice i ON ii.invoiceId = i.invoiceId " +
-                     "JOIN Item it ON ii.itemId = it.itemId";
+    	String sql = "SELECT i.invoiceUuid, it.itemUuid, it.itemType, it.name, " +
+                "it.basePrice, it.serviceRate, it.licenseFee, " +
+                "ii.quantityOrHours, ii.startDate, ii.endDate, ii.purchaseOrLease, " +
+                "p.personUuid " + 
+                "FROM InvoiceItem ii " +
+                "JOIN Invoice i ON ii.invoiceId = i.invoiceId " + // JOIN on IDs
+                "JOIN Item it ON ii.itemId = it.itemId " +      // JOIN on IDs
+                "LEFT JOIN Person p ON ii.servicePersonId = p.personId";
         try (Connection conn = ConnectionFactory.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                Invoice inv = invoices.get(rs.getString("invoiceUuid"));
-                if (inv == null) continue;
+            
+        	while (rs.next()) {
+        	    // 1. Get the Raw ID from the database
+        	    String rawInvUuid = rs.getString("invoiceUuid");
+        	    
+        	    // 2. GUARD: Skip this row if the invoice UUID is null
+        	    if (rawInvUuid == null) continue;
 
-                String type = rs.getString("itemType");
-                String uuid = rs.getString("itemUuid");
-                String name = rs.getString("name");
-                double qh = rs.getDouble("quantityOrHours");
+        	    // 3. Normalize and find the invoice
+        	    String invKey = rawInvUuid.trim().toLowerCase();
+        	    Invoice inv = invoices.get(invKey);
+        	    
+        	    if (inv != null) {
+        	        // 4. GUARD: Check Item Type and UUID before trimming
+        	        String rawType = rs.getString("itemType");
+        	        String rawItemUuid = rs.getString("itemUuid");
+        	        
+        	        if (rawType == null || rawItemUuid == null) continue;
 
-                if (type.equals("E")) {
-                    inv.addItem(new Equipment(uuid, name, rs.getDouble("basePrice"), (int)qh));
-                } else if (type.equals("S")) {
-                    inv.addItem(new Service(uuid, name, rs.getDouble("serviceRate"), qh));
-                } else if (type.equals("L")) {
-                    inv.addItem(new License(uuid, name, rs.getDouble("basePrice"), (int)qh));
-                }
-            }
-        } catch (SQLException e) { logger.error("Error loading invoice items: ", e); }
+        	        String type = rawType.trim();
+        	        String itemUuid = rawItemUuid.trim();
+        	        String name = rs.getString("name");
+        	        double qty = rs.getDouble("quantityOrHours");
+
+        	        if (type.equals("E")) {
+        	            inv.addItem(new Equipment(itemUuid, name, rs.getDouble("basePrice"), (int)qty, rs.getString("purchaseOrLease")));
+        	        } else if (type.equals("S")) {
+        	            String techUuid = rs.getString("personUuid");
+        	            Person technician = (techUuid != null) ? persons.get(techUuid.trim()) : null;
+        	            inv.addItem(new Service(itemUuid, name, rs.getDouble("serviceRate"), technician, qty));
+        	        } else if (type.equals("L")) {
+        	            java.sql.Date start = rs.getDate("startDate");
+        	            java.sql.Date end = rs.getDate("endDate");
+        	            if (start != null && end != null) {
+        	                inv.addItem(new License(itemUuid, name, rs.getDouble("basePrice"), rs.getDouble("licenseFee"), 
+        	                            start.toLocalDate(), end.toLocalDate()));
+        	            }
+        	        }
+        	    }
+        	}
+        } catch (SQLException e) {
+            logger.error("Error loading invoice items", e);
+        }
     }
-
+    
     public Map<String, Person> getPersons() { return this.persons; }
     public Map<String, Company> getCompanies() { return this.companies; }
     public Map<String, Item> getItemTemplates() { return this.itemTemplates; }
